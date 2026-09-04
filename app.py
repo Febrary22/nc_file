@@ -44,7 +44,7 @@ def list_local_files():
 
 @st.cache_resource(show_spinner="파일을 여는 중...")
 def open_dataset(path: str):
-    return xr.open_dataset(path)
+    return xr.open_dataset(path, engine="h5netcdf")
 
 
 def data_var_names(ds: xr.Dataset):
