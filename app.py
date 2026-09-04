@@ -88,7 +88,7 @@ def list_local_files():
     return sorted(glob.glob(os.path.join(DATA_DIR, "*.nc")))
 
 
-@st.cache_resource(show_spinner="파일을 여는 중...")
+@st.cache_resource(show_spinner="파일을 여는 중...", max_entries=4)
 def open_dataset(path: str):
     return xr.open_dataset(path, engine="h5netcdf")
 
@@ -120,11 +120,21 @@ for p in local_files:
     file_options[os.path.basename(p)] = p
 
 if uploaded:
-    tmp_dir = tempfile.mkdtemp()
+    # ⚠️ 슬라이더를 움직이는 것만으로도 스크립트 전체가 매번 다시 실행된다(Streamlit
+    # rerun). 예전에는 여기서 매번 tempfile.mkdtemp()로 "새" 임시 폴더를 만들었는데,
+    # 그러면 open_dataset()에 넘어가는 경로가 rerun마다 달라져서 @st.cache_resource가
+    # 절대 캐시를 재사용하지 못하고 매번 새 xarray Dataset(=열린 파일 핸들)을 만들어
+    # 캐시에 영구히 쌓기만 했다. 그래서 깊이 슬라이더를 몇 번 움직이는 사이에 데이터셋이
+    # 계속 늘어나며 메모리를 다 써버렸던 것 — session_state에 임시 폴더를 한 번만
+    # 만들어 재사용하고, 같은 파일은 다시 쓰지 않는다.
+    if "upload_tmp_dir" not in st.session_state:
+        st.session_state.upload_tmp_dir = tempfile.mkdtemp()
+    tmp_dir = st.session_state.upload_tmp_dir
     for uf in uploaded:
         tmp_path = os.path.join(tmp_dir, uf.name)
-        with open(tmp_path, "wb") as f:
-            f.write(uf.getbuffer())
+        if not os.path.exists(tmp_path):
+            with open(tmp_path, "wb") as f:
+                f.write(uf.getbuffer())
         file_options[uf.name] = tmp_path
 
 if not file_options:
