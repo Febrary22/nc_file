@@ -10,6 +10,7 @@ import glob
 import os
 import tempfile
 
+import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
@@ -18,6 +19,36 @@ import xarray as xr
 st.set_page_config(page_title="NC Viewer", page_icon="🌊", layout="wide")
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+
+
+# ---------------------------------------------------------------------------
+# 한글 폰트 설정 (그래프 제목/축에 한글이 들어가서 안 해주면 계속 경고가 뜸)
+# ---------------------------------------------------------------------------
+
+def setup_korean_font():
+    """설치된 나눔고딕을 찾아 matplotlib 기본 폰트로 등록한다.
+
+    Streamlit Cloud에서는 `packages.txt`에 적어둔 `fonts-nanum`이 설치되어
+    아래 경로들 중 하나에 폰트가 존재하게 된다. 로컬에 폰트가 없는 환경에서는
+    조용히 넘어가고 matplotlib 기본 폰트를 그대로 쓴다(한글은 네모로 깨지지만
+    앱이 죽지는 않음).
+    """
+    candidates = [
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/usr/share/fonts/truetype/nanum/NanumGothic-Regular.ttf",
+    ]
+    candidates += glob.glob("/usr/share/fonts/**/Nanum*Gothic*.ttf", recursive=True)
+
+    for path in candidates:
+        if os.path.exists(path):
+            fm.fontManager.addfont(path)
+            plt.rcParams["font.family"] = fm.FontProperties(fname=path).get_name()
+            break
+
+    plt.rcParams["axes.unicode_minus"] = False  # 한글 폰트 사용 시 마이너스 기호 깨짐 방지
+
+
+setup_korean_font()
 
 # 변수명이 축약어라 초보자에게 뜻이 안 와닿는 경우가 많아서 한글 설명을 붙여줌
 VAR_KOR_NAME = {
@@ -243,3 +274,8 @@ buf_path = os.path.join(tempfile.gettempdir(), "nc_viewer_plot.png")
 fig.savefig(buf_path, dpi=150, bbox_inches="tight")
 with open(buf_path, "rb") as f:
     st.download_button("🖼️ 그림 PNG로 다운로드", f, file_name=f"{varname}_{selected_name}.png")
+
+# st.pyplot()에 넘긴 뒤에도 fig 객체는 계속 메모리에 남아있어서, 화면에 다 그리고
+# PNG 저장까지 끝난 지금 명시적으로 닫아준다. 안 닫으면 슬라이더를 조작할 때마다
+# figure가 계속 쌓여서 Streamlit Cloud처럼 메모리가 적은 환경에서 앱이 죽는다.
+plt.close(fig)
