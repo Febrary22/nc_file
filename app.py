@@ -6,6 +6,7 @@ NC Viewer — 해양 예측 NetCDF(.nc) 파일을 클릭 몇 번으로 확인하
     streamlit run app.py
 """
 
+import gc
 import glob
 import os
 import tempfile
@@ -15,6 +16,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
 import xarray as xr
+
+# 지도에 실제로 찍을 최대 격자 포인트 수. 고해상도 해양 모델(수천x수천 격자)을
+# 매번 원본 해상도 그대로 그리면 pcolormesh 내부에서 좌표 배열이 커져 메모리를
+# 크게 잡아먹고, Streamlit Cloud 무료 티어(메모리 제한이 빡빡함)에서는 그대로
+# 앱이 죽는다. 화면에 보여주는 해상도만 낮추고 원본 데이터/통계는 그대로 쓴다.
+MAX_PLOT_POINTS = 400 * 400
+
+
+def downsample_step(n_rows: int, n_cols: int, max_points: int = MAX_PLOT_POINTS) -> int:
+    """격자 전체 포인트 수가 max_points를 넘으면 몇 칸 간격으로 솎아낼지 계산"""
+    total = n_rows * n_cols
+    if total <= max_points:
+        return 1
+    return int(np.ceil((total / max_points) ** 0.5))
 
 st.set_page_config(page_title="NC Viewer", page_icon="🌊", layout="wide")
 
@@ -217,8 +232,28 @@ lon = ds["lon"].values
 lat = ds["lat"].values
 values = slice_da.values
 
+
+def thin(arr: np.ndarray, step: int) -> np.ndarray:
+    """1차원(격자형) / 2차원(곡선형) lon·lat 좌표 모두에 대응하는 다운샘플링"""
+    if arr.ndim == 1:
+        return arr[::step]
+    return arr[::step, ::step]
+
+
+# 격자가 너무 촘촘하면(고해상도 모델, 특히 lon/lat이 2차원인 곡선형 격자) 화면에
+# 보여주는 해상도만 낮춰서 렌더링 비용을 줄인다. 통계 계산 등에는 원본 values를 쓴다.
+plot_step = downsample_step(values.shape[-2], values.shape[-1])
+lon_plot = thin(lon, plot_step)
+lat_plot = thin(lat, plot_step)
+values_plot = values[::plot_step, ::plot_step]
+if plot_step > 1:
+    st.caption(
+        f"⚡ 격자가 커서({values.shape[-2]}x{values.shape[-1]}) 화면에는 {plot_step}칸 "
+        "간격으로 축소해서 보여주고 있어요 (통계값은 원본 그대로예요)."
+    )
+
 fig, ax = plt.subplots(figsize=(9, 7))
-mesh = ax.pcolormesh(lon, lat, values, cmap="turbo", shading="auto")
+mesh = ax.pcolormesh(lon_plot, lat_plot, values_plot, cmap="turbo", shading="auto")
 cbar = fig.colorbar(mesh, ax=ax, shrink=0.8)
 cbar.set_label(f"{varname} ({da.attrs.get('units', '')})")
 
@@ -238,12 +273,14 @@ if overlay_current:
     if other_path:
         other_ds = open_dataset(other_path)
         other_da = other_ds[other_var].isel(**sel)
-        step = 20  # 격자 전체를 다 그리면 너무 빽빽해서 일부만 샘플링
+        # 화살표는 pcolormesh보다 훨씬 듬성듬성해도 되니, 다운샘플링 간격에
+        # 최소 20칸을 더해서 고해상도 격자에서도 화살표 개수가 폭증하지 않게 한다.
+        step = max(20, plot_step)
         u = (ds["uo"].isel(**sel) if varname == "uo" else other_da).values
         v = (other_da if varname == "uo" else ds["vo"].isel(**sel)).values
         ax.quiver(
-            lon[::step, ::step],
-            lat[::step, ::step],
+            thin(lon, step),
+            thin(lat, step),
             u[::step, ::step],
             v[::step, ::step],
             color="white",
@@ -279,3 +316,5 @@ with open(buf_path, "rb") as f:
 # PNG 저장까지 끝난 지금 명시적으로 닫아준다. 안 닫으면 슬라이더를 조작할 때마다
 # figure가 계속 쌓여서 Streamlit Cloud처럼 메모리가 적은 환경에서 앱이 죽는다.
 plt.close(fig)
+del values, values_plot, lon_plot, lat_plot
+gc.collect()
