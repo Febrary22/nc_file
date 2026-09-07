@@ -8,8 +8,10 @@ NC Viewer — 해양 예측 NetCDF(.nc) 파일을 클릭 몇 번으로 확인하
 
 import glob
 import os
+import re
 import tempfile
 
+import koreanize_matplotlib  # noqa: F401  (matplotlib에 한글 폰트를 자동 등록해줌)
 import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
@@ -53,6 +55,18 @@ def data_var_names(ds: xr.Dataset):
     return [v for v in ds.data_vars if v not in coord_like]
 
 
+_MONTH_RE = re.compile(r"(20\d{2})(0[1-9]|1[0-2])")
+
+
+def month_label(filename: str) -> str:
+    """파일명에서 YYYYMM 패턴을 찾아 'YYYY년 MM월' 형태로 바꿔준다.
+    (예: zos_predict_202608.nc -> 2026년 08월). 못 찾으면 파일명 그대로 반환."""
+    m = _MONTH_RE.search(filename)
+    if not m:
+        return filename
+    return f"{m.group(1)}년 {m.group(2)}월"
+
+
 # ---------------------------------------------------------------------------
 # 사이드바: 파일 선택
 # ---------------------------------------------------------------------------
@@ -87,7 +101,14 @@ if not file_options:
     )
     st.stop()
 
-selected_name = st.sidebar.selectbox("파일 선택", list(file_options.keys()))
+def _file_select_label(name: str) -> str:
+    label = month_label(name)
+    return f"{label} ({name})" if label != name else name
+
+
+selected_name = st.sidebar.selectbox(
+    "파일 선택", sorted(file_options.keys()), format_func=_file_select_label
+)
 selected_path = file_options[selected_name]
 
 ds = open_dataset(selected_path)
@@ -243,3 +264,79 @@ buf_path = os.path.join(tempfile.gettempdir(), "nc_viewer_plot.png")
 fig.savefig(buf_path, dpi=150, bbox_inches="tight")
 with open(buf_path, "rb") as f:
     st.download_button("🖼️ 그림 PNG로 다운로드", f, file_name=f"{varname}_{selected_name}.png")
+
+# ---------------------------------------------------------------------------
+# 두 시점 비교 (예: 이번 달 예측 vs 지난 달 예측)
+# ---------------------------------------------------------------------------
+
+st.divider()
+st.subheader("📉 두 시점 비교 (차이 지도)")
+
+# 같은 변수를 담고 있을 것으로 보이는 파일들(파일명에 변수명이 포함된 것)만 후보로 삼는다
+compare_candidates = sorted(
+    name for name in file_options if varname in name
+)
+
+if len(compare_candidates) < 2:
+    st.info(
+        f"'{varname}' 변수가 들어있는 파일이 2개 이상 있어야 비교할 수 있어요. "
+        "같은 변수의 다른 시점(달) 파일을 함께 업로드해보세요."
+    )
+else:
+    cmp_col1, cmp_col2 = st.columns(2)
+    with cmp_col1:
+        name_a = st.selectbox(
+            "기준 시점 (A)",
+            compare_candidates,
+            index=0,
+            format_func=month_label,
+            key="compare_a",
+        )
+    with cmp_col2:
+        name_b = st.selectbox(
+            "비교 시점 (B)",
+            compare_candidates,
+            index=len(compare_candidates) - 1,
+            format_func=month_label,
+            key="compare_b",
+        )
+
+    if name_a == name_b:
+        st.warning("서로 다른 두 시점을 선택해주세요.")
+    else:
+        ds_a = open_dataset(file_options[name_a])
+        ds_b = open_dataset(file_options[name_b])
+        da_a = ds_a[varname].isel(**{k: v for k, v in sel.items() if k in ds_a[varname].dims})
+        da_b = ds_b[varname].isel(**{k: v for k, v in sel.items() if k in ds_b[varname].dims})
+        values_a = da_a.values
+        values_b = da_b.values
+
+        if values_a.shape != values_b.shape:
+            st.error("두 파일의 격자 크기가 달라서 비교할 수 없어요.")
+        else:
+            diff = values_b - values_a
+            valid_diff = diff[~np.isnan(diff)]
+
+            fig_diff, ax_diff = plt.subplots(figsize=(9, 7))
+            vmax = np.abs(valid_diff).max() if valid_diff.size else 1
+            mesh_diff = ax_diff.pcolormesh(
+                lon, lat, diff, cmap="coolwarm", shading="auto", vmin=-vmax, vmax=vmax
+            )
+            cbar_diff = fig_diff.colorbar(mesh_diff, ax=ax_diff, shrink=0.8)
+            cbar_diff.set_label(f"{varname} 차이 (B - A, {da.attrs.get('units', '')})")
+            ax_diff.set_title(
+                f"{month_label(name_b)} - {month_label(name_a)} "
+                f"({VAR_KOR_NAME.get(varname, varname)})"
+            )
+            ax_diff.set_xlabel("경도 (Longitude)")
+            ax_diff.set_ylabel("위도 (Latitude)")
+            ax_diff.set_aspect("equal")
+            st.pyplot(fig_diff, use_container_width=True)
+
+            if valid_diff.size:
+                d1, d2, d3 = st.columns(3)
+                d1.metric("최소 차이", f"{valid_diff.min():.3f}")
+                d2.metric("최대 차이", f"{valid_diff.max():.3f}")
+                d3.metric("평균 차이", f"{valid_diff.mean():.3f}")
+            else:
+                st.write("비교할 유효한 값이 없어요.")
