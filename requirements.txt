@@ -5,3 +5,4 @@ h5netcdf>=1.3
 h5py>=3.10
 matplotlib>=3.8
 numpy>=1.26
+koreanize-matplotlib>=0.1.1

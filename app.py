@@ -9,8 +9,10 @@ NC Viewer — 해양 예측 NetCDF(.nc) 파일을 클릭 몇 번으로 확인하
 import gc
 import glob
 import os
+import re
 import tempfile
 
+import koreanize_matplotlib  # noqa: F401  (한글 폰트가 전혀 없는 환경을 위한 기본 안전망)
 import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 import numpy as np
@@ -44,9 +46,10 @@ def setup_korean_font():
     """설치된 나눔고딕을 찾아 matplotlib 기본 폰트로 등록한다.
 
     Streamlit Cloud에서는 `packages.txt`에 적어둔 `fonts-nanum`이 설치되어
-    아래 경로들 중 하나에 폰트가 존재하게 된다. 로컬에 폰트가 없는 환경에서는
-    조용히 넘어가고 matplotlib 기본 폰트를 그대로 쓴다(한글은 네모로 깨지지만
-    앱이 죽지는 않음).
+    아래 경로들 중 하나에 폰트가 존재하게 된다. 이 경로에 폰트가 없는 로컬
+    환경(팀원 개인 PC 등)에서는 이 함수가 조용히 넘어가는데, 그 경우에도
+    파일 맨 위에서 import한 `koreanize_matplotlib`가 자체적으로 내장한
+    한글 폰트를 자동 등록해주기 때문에 한글이 깨지지 않는다.
     """
     candidates = [
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
@@ -99,6 +102,18 @@ def data_var_names(ds: xr.Dataset):
     return [v for v in ds.data_vars if v not in coord_like]
 
 
+_MONTH_RE = re.compile(r"(20\d{2})(0[1-9]|1[0-2])")
+
+
+def month_label(filename: str) -> str:
+    """파일명에서 YYYYMM 패턴을 찾아 'YYYY년 MM월' 형태로 바꿔준다.
+    (예: zos_predict_202608.nc -> 2026년 08월). 못 찾으면 파일명 그대로 반환."""
+    m = _MONTH_RE.search(filename)
+    if not m:
+        return filename
+    return f"{m.group(1)}년 {m.group(2)}월"
+
+
 # ---------------------------------------------------------------------------
 # 사이드바: 파일 선택
 # ---------------------------------------------------------------------------
@@ -143,7 +158,14 @@ if not file_options:
     )
     st.stop()
 
-selected_name = st.sidebar.selectbox("파일 선택", list(file_options.keys()))
+def _file_select_label(name: str) -> str:
+    label = month_label(name)
+    return f"{label} ({name})" if label != name else name
+
+
+selected_name = st.sidebar.selectbox(
+    "파일 선택", sorted(file_options.keys()), format_func=_file_select_label
+)
 selected_path = file_options[selected_name]
 
 ds = open_dataset(selected_path)
@@ -328,3 +350,89 @@ with open(buf_path, "rb") as f:
 plt.close(fig)
 del values, values_plot, lon_plot, lat_plot
 gc.collect()
+
+# ---------------------------------------------------------------------------
+# 두 시점 비교 (예: 이번 달 예측 vs 지난 달 예측)
+# ---------------------------------------------------------------------------
+
+st.divider()
+st.subheader("📉 두 시점 비교 (차이 지도)")
+
+# 같은 변수를 담고 있을 것으로 보이는 파일들(파일명에 변수명이 포함된 것)만 후보로 삼는다
+compare_candidates = sorted(name for name in file_options if varname in name)
+
+if len(compare_candidates) < 2:
+    st.info(
+        f"'{varname}' 변수가 들어있는 파일이 2개 이상 있어야 비교할 수 있어요. "
+        "같은 변수의 다른 시점(달) 파일을 함께 업로드해보세요."
+    )
+else:
+    cmp_col1, cmp_col2 = st.columns(2)
+    with cmp_col1:
+        name_a = st.selectbox(
+            "기준 시점 (A)",
+            compare_candidates,
+            index=0,
+            format_func=month_label,
+            key="compare_a",
+        )
+    with cmp_col2:
+        name_b = st.selectbox(
+            "비교 시점 (B)",
+            compare_candidates,
+            index=len(compare_candidates) - 1,
+            format_func=month_label,
+            key="compare_b",
+        )
+
+    if name_a == name_b:
+        st.warning("서로 다른 두 시점을 선택해주세요.")
+    else:
+        ds_a = open_dataset(file_options[name_a])
+        ds_b = open_dataset(file_options[name_b])
+        da_a = ds_a[varname].isel(**{k: v for k, v in sel.items() if k in ds_a[varname].dims})
+        da_b = ds_b[varname].isel(**{k: v for k, v in sel.items() if k in ds_b[varname].dims})
+        values_a = da_a.values
+        values_b = da_b.values
+
+        if values_a.shape != values_b.shape:
+            st.error("두 파일의 격자 크기가 달라서 비교할 수 없어요.")
+        else:
+            diff = values_b - values_a
+            valid_diff = diff[~np.isnan(diff)]
+
+            # 지도와 마찬가지로 고해상도 격자는 화면 표시용만 다운샘플링한다
+            diff_step = downsample_step(diff.shape[-2], diff.shape[-1])
+            lon_diff = thin(lon, diff_step)
+            lat_diff = thin(lat, diff_step)
+            diff_plot = diff[::diff_step, ::diff_step]
+
+            vmax = np.abs(valid_diff).max() if valid_diff.size else 1
+            fig_diff, ax_diff = plt.subplots(figsize=(9, 7))
+            mesh_diff = ax_diff.pcolormesh(
+                lon_diff, lat_diff, diff_plot, cmap="coolwarm", shading="auto", vmin=-vmax, vmax=vmax
+            )
+            cbar_diff = fig_diff.colorbar(mesh_diff, ax=ax_diff, shrink=0.8)
+            cbar_diff.set_label(f"{varname} 차이 (B - A, {da.attrs.get('units', '')})")
+            ax_diff.set_title(
+                f"{month_label(name_b)} - {month_label(name_a)} "
+                f"({VAR_KOR_NAME.get(varname, varname)})"
+            )
+            ax_diff.set_xlabel("경도 (Longitude)")
+            ax_diff.set_ylabel("위도 (Latitude)")
+            ax_diff.set_aspect("equal")
+            st.pyplot(fig_diff, use_container_width=True)
+
+            if valid_diff.size:
+                d1, d2, d3 = st.columns(3)
+                d1.metric("최소 차이", f"{valid_diff.min():.3f}")
+                d2.metric("최대 차이", f"{valid_diff.max():.3f}")
+                d3.metric("평균 차이", f"{valid_diff.mean():.3f}")
+            else:
+                st.write("비교할 유효한 값이 없어요.")
+
+            # 여기서 만든 fig도 다른 그래프들과 마찬가지로 명시적으로 정리해서
+            # 메모리가 계속 쌓이지 않게 한다.
+            plt.close(fig_diff)
+            del diff, diff_plot, values_a, values_b, lon_diff, lat_diff
+            gc.collect()
