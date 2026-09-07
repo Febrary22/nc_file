@@ -1,0 +1,4 @@
+# Streamlit 서버 설정
+# maxUploadSize 단위는 MB입니다. 기본값 200MB -> 2048MB(2GB)로 상향.
+[server]
+maxUploadSize = 2048
