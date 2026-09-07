@@ -6,6 +6,8 @@ NC Viewer — 해양 예측 NetCDF(.nc) 파일을 클릭 몇 번으로 확인하
     streamlit run app.py
 """
 
+from __future__ import annotations
+
 import gc
 import glob
 import os
@@ -96,10 +98,30 @@ def open_dataset(path: str):
     return xr.open_dataset(path, engine="h5netcdf")
 
 
+# 파일마다 경도/위도 변수 이름이 조금씩 다르다 (일반 CF 규격은 lon/lat, ROMS 격자
+# 파일은 lon_rho/lat_rho, 일부 모델은 longitude/latitude, nav_lon/nav_lat 등을 씀).
+# 이름이 다르다고 바로 에러를 내지 않고, 알려진 이름들 중 실제 있는 걸 찾아 쓴다.
+LON_NAME_CANDIDATES = ["lon", "longitude", "lon_rho", "nav_lon", "long", "x"]
+LAT_NAME_CANDIDATES = ["lat", "latitude", "lat_rho", "nav_lat", "y"]
+COORD_LIKE_NAMES = {
+    "time",
+    "depth",
+    *LON_NAME_CANDIDATES,
+    *LAT_NAME_CANDIDATES,
+}
+
+
+def find_coord_name(ds: xr.Dataset, candidates: list[str]) -> str | None:
+    """후보 이름들 중 이 파일에 실제로 있는 변수 이름을 찾아 반환한다."""
+    for name in candidates:
+        if name in ds.variables:
+            return name
+    return None
+
+
 def data_var_names(ds: xr.Dataset):
     """좌표(coord) 변수를 뺀 실제 데이터 변수만 추출"""
-    coord_like = {"time", "depth", "lat", "lon", "latitude", "longitude"}
-    return [v for v in ds.data_vars if v not in coord_like]
+    return [v for v in ds.data_vars if v not in COORD_LIKE_NAMES]
 
 
 _MONTH_RE = re.compile(r"(20\d{2})(0[1-9]|1[0-2])")
@@ -260,8 +282,20 @@ if varname in ("uo", "vo"):
 # ---------------------------------------------------------------------------
 
 slice_da = da.isel(**sel)
-lon = ds["lon"].values
-lat = ds["lat"].values
+
+lon_name = find_coord_name(ds, LON_NAME_CANDIDATES)
+lat_name = find_coord_name(ds, LAT_NAME_CANDIDATES)
+if lon_name is None or lat_name is None:
+    st.error(
+        "이 파일에서 경도/위도 좌표 변수를 찾지 못했어요. "
+        f"(파일 안의 변수 목록: {', '.join(ds.variables)})\n\n"
+        "경도/위도 변수 이름이 흔히 쓰는 이름(lon, lat, lon_rho, longitude 등)과 "
+        "다르면 이렇게 나올 수 있어요. 파일을 만든 팀에 변수 이름을 확인해주세요."
+    )
+    st.stop()
+
+lon = ds[lon_name].values
+lat = ds[lat_name].values
 values = slice_da.values
 
 
